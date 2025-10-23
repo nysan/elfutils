@@ -30,6 +30,10 @@
 #include <dwarf.h>
 #include <system.h>
 #include <printversion.h>
+#include <signal.h>
+#ifdef __linux__
+#include <sys/procfs.h>
+#endif
 
 /* Name and version of program.  */
 ARGP_PROGRAM_VERSION_HOOK_DEF = print_version;
@@ -52,6 +56,7 @@ static bool show_raw = false;
 static bool show_modules = false;
 static bool show_debugname = false;
 static bool show_inlines = false;
+static bool show_signal = false;
 
 static int maxframes = 256;
 
@@ -107,6 +112,350 @@ static bool frames_shown = false;
 #define EXIT_ERROR  1
 #define EXIT_BAD    2
 #define EXIT_USAGE 64
+
+
+/* Describe si_code for known signals. */
+static const char*
+sigcode_desc (int signo, int code)
+{
+  switch (signo)
+    {
+    case SIGILL:
+      switch (code)
+        {
+#ifdef ILL_ILLOPC
+        case ILL_ILLOPC: return "illegal opcode";
+#endif
+#ifdef ILL_ILLOPN
+        case ILL_ILLOPN: return "illegal operand";
+#endif
+#ifdef ILL_ILLADR
+        case ILL_ILLADR: return "illegal addressing mode";
+#endif
+#ifdef ILL_ILLTRP
+        case ILL_ILLTRP: return "illegal trap";
+#endif
+#ifdef ILL_PRVOPC
+        case ILL_PRVOPC: return "privileged opcode";
+#endif
+#ifdef ILL_PRVREG
+        case ILL_PRVREG: return "privileged register";
+#endif
+#ifdef ILL_COPROC
+        case ILL_COPROC: return "coprocessor error";
+#endif
+#ifdef ILL_BADSTK
+        case ILL_BADSTK: return "internal stack error";
+#endif
+        default: return NULL;
+        }
+    case SIGFPE:
+      switch (code)
+        {
+#ifdef FPE_INTDIV
+        case FPE_INTDIV: return "integer divide by zero";
+#endif
+#ifdef FPE_INTOVF
+        case FPE_INTOVF: return "integer overflow";
+#endif
+#ifdef FPE_FLTDIV
+        case FPE_FLTDIV: return "floating-point divide by zero";
+#endif
+#ifdef FPE_FLTOVF
+        case FPE_FLTOVF: return "floating-point overflow";
+#endif
+#ifdef FPE_FLTUND
+        case FPE_FLTUND: return "floating-point underflow";
+#endif
+#ifdef FPE_FLTRES
+        case FPE_FLTRES: return "floating-point inexact result";
+#endif
+#ifdef FPE_FLTINV
+        case FPE_FLTINV: return "floating-point invalid operation";
+#endif
+#ifdef FPE_FLTSUB
+        case FPE_FLTSUB: return "subscript out of range";
+#endif
+        default: return NULL;
+        }
+    case SIGSEGV:
+      switch (code)
+        {
+#ifdef SEGV_MAPERR
+        case SEGV_MAPERR: return "address not mapped to object";
+#endif
+#ifdef SEGV_ACCERR
+        case SEGV_ACCERR: return "invalid permissions for mapped object";
+#endif
+#ifdef SEGV_BNDERR
+        case SEGV_BNDERR: return "failed bounds checks";
+#endif
+#ifdef SEGV_PKUERR
+        case SEGV_PKUERR: return "protection key violation";
+#endif
+        default: return NULL;
+        }
+    case SIGBUS:
+      switch (code)
+        {
+#ifdef BUS_ADRALN
+        case BUS_ADRALN: return "invalid address alignment";
+#endif
+#ifdef BUS_ADRERR
+        case BUS_ADRERR: return "nonexistent physical address";
+#endif
+#ifdef BUS_OBJERR
+        case BUS_OBJERR: return "object-specific hardware error";
+#endif
+#ifdef BUS_MCEERR_AR
+        case BUS_MCEERR_AR: return "hardware memory error: action required";
+#endif
+#ifdef BUS_MCEERR_AO
+        case BUS_MCEERR_AO: return "hardware memory error: action optional";
+#endif
+        default: return NULL;
+        }
+    case SIGTRAP:
+      switch (code)
+        {
+#ifdef TRAP_BRKPT
+        case TRAP_BRKPT: return "process breakpoint";
+#endif
+#ifdef TRAP_TRACE
+        case TRAP_TRACE: return "process trace trap";
+#endif
+        default: return NULL;
+        }
+    case SIGCHLD:
+      switch (code)
+        {
+#ifdef CLD_EXITED
+        case CLD_EXITED: return "child has exited";
+#endif
+#ifdef CLD_KILLED
+        case CLD_KILLED: return "child was killed";
+#endif
+#ifdef CLD_DUMPED
+        case CLD_DUMPED: return "child terminated abnormally";
+#endif
+#ifdef CLD_TRAPPED
+        case CLD_TRAPPED: return "traced child has trapped";
+#endif
+#ifdef CLD_STOPPED
+        case CLD_STOPPED: return "child has stopped";
+#endif
+#ifdef CLD_CONTINUED
+        case CLD_CONTINUED: return "stopped child continued";
+#endif
+        default: return NULL;
+        }
+    case SIGPOLL:
+#if defined(SIGIO) && (!defined(SIGPOLL) || SIGIO != SIGPOLL)
+    case SIGIO:
+#endif
+      switch (code)
+        {
+#ifdef POLL_IN
+        case POLL_IN: return "data input available";
+#endif
+#ifdef POLL_OUT
+        case POLL_OUT: return "output buffers available";
+#endif
+#ifdef POLL_MSG
+        case POLL_MSG: return "input message available";
+#endif
+#ifdef POLL_ERR
+        case POLL_ERR: return "I/O error";
+#endif
+#ifdef POLL_PRI
+        case POLL_PRI: return "high priority input available";
+#endif
+#ifdef POLL_HUP
+        case POLL_HUP: return "device disconnected";
+#endif
+        default: return NULL;
+        }
+    case SIGSYS:
+      switch (code)
+        {
+#ifdef SYS_SECCOMP
+        case SYS_SECCOMP: return "bad system call (seccomp)";
+#endif
+        default: return NULL;
+        }
+    default:
+      break;
+    }
+  /* If we didn't find a signal-specific description, try generic SI_* codes. */
+  switch (code)
+    {
+#ifdef SI_USER
+    case SI_USER: return "signal sent by kill()";
+#endif
+#ifdef SI_KERNEL
+    case SI_KERNEL: return "sent by kernel";
+#endif
+#ifdef SI_QUEUE
+    case SI_QUEUE: return "signal sent by sigqueue()";
+#endif
+#ifdef SI_TIMER
+    case SI_TIMER: return "signal generated by expiration of a timer";
+#endif
+#ifdef SI_MESGQ
+    case SI_MESGQ: return "signal generated by arrival of a message";
+#endif
+#ifdef SI_ASYNCIO
+    case SI_ASYNCIO: return "signal generated by asynchronous I/O completion";
+#endif
+#ifdef SI_TKILL
+    case SI_TKILL: return "signal sent by tkill()/tgkill()";
+#endif
+    default: return NULL;
+    }
+}
+
+/* Print additional siginfo_t fields depending on the signal. */
+static void
+print_siginfo_fields (int signo, const siginfo_t *si)
+{
+  /* Common queued signal info. */
+  if (si->si_pid > 0)
+    printf ("  si_pid: %d\n", si->si_pid);
+  if (si->si_uid > 0)
+    printf ("  si_uid: %u\n", (unsigned) si->si_uid);
+
+  /* Signal-specific details. */
+  switch (signo)
+    {
+    case SIGILL:
+    case SIGFPE:
+    case SIGSEGV:
+    case SIGBUS:
+    case SIGTRAP:
+      if (si->si_addr != NULL)
+        printf ("  si_addr: 0x%0" PRIxPTR "\n", (uintptr_t) si->si_addr);
+      break;
+    case SIGCHLD:
+      if (si->si_pid > 0)
+        printf ("  si_status: %d\n", si->si_status);
+      /* These may be available on some libcs. */
+#ifdef si_utime
+      printf ("  si_utime: %ld\n", (long) si->si_utime);
+#endif
+#ifdef si_stime
+      printf ("  si_stime: %ld\n", (long) si->si_stime);
+#endif
+      break;
+    case SIGPOLL:
+#if defined(SIGIO) && (!defined(SIGPOLL) || SIGIO != SIGPOLL)
+    case SIGIO:
+#endif
+      printf ("  si_band: %ld\n", (long) si->si_band);
+      printf ("  si_fd: %d\n", si->si_fd);
+      break;
+    case SIGSYS:
+#ifdef __GLIBC__
+# ifdef si_syscall
+      printf ("  si_syscall: %d\n", si->si_syscall);
+# endif
+# ifdef si_arch
+      printf ("  si_arch: %u\n", (unsigned) si->si_arch);
+# endif
+#endif
+      break;
+    default:
+      break;
+    }
+
+  /* Optional queued value. Only meaningful for SI_QUEUE/SI_TIMER etc. */
+  if (si->si_code == SI_QUEUE || si->si_code == SI_TIMER)
+    {
+      printf ("  si_value.sival_int: %d\n", si->si_value.sival_int);
+      printf ("  si_value.sival_ptr: 0x%0" PRIxPTR "\n", (uintptr_t) si->si_value.sival_ptr);
+/* Non-portable, print if available. */
+#ifdef si_overrun
+      printf ("  si_overrun: %d\n", si->si_overrun);
+#endif
+#ifdef si_timerid
+      printf ("  si_timerid: %d\n", si->si_timerid);
+#endif
+    }
+}
+
+/* Print the signal that caused the core dump, if available. */
+static void
+print_core_signal (void)
+{
+  if (core == NULL)
+    return;
+
+  size_t nphdrs = 0;
+  if (elf_getphdrnum (core, &nphdrs) != 0)
+    return;
+
+  for (size_t i = 0; i < nphdrs; i++)
+    {
+      GElf_Phdr phdr_mem;
+      GElf_Phdr *phdr = gelf_getphdr (core, i, &phdr_mem);
+      if (phdr == NULL || phdr->p_type != PT_NOTE || phdr->p_filesz == 0)
+        continue;
+
+      Elf_Data *data = elf_getdata_rawchunk (core, phdr->p_offset,
+                                             phdr->p_filesz, ELF_T_NHDR);
+      if (data == NULL || data->d_buf == NULL || data->d_size == 0)
+        continue;
+
+      size_t off = 0;
+      GElf_Nhdr nhdr;
+      size_t name_off = 0;
+      size_t desc_off = 0;
+
+      while ((off = gelf_getnote (data, off, &nhdr, &name_off, &desc_off)) > 0)
+        {
+          const char *desc = (const char *) data->d_buf + desc_off;
+          size_t descsz = nhdr.n_descsz;
+
+          if (nhdr.n_type == NT_SIGINFO && desc != NULL && descsz >= sizeof (siginfo_t))
+            {
+              siginfo_t si;
+              memcpy (&si, desc, sizeof (siginfo_t));
+              int signo = si.si_signo;
+              const char *sname = strsignal (signo);
+              if (sname == NULL) sname = "unknown";
+              printf ("Signal %d (%s)\n", signo, sname);
+              /* Print extended info when available. */
+              int code = si.si_code;
+              const char *cdesc = sigcode_desc (signo, code);
+              if (cdesc != NULL)
+                printf ("  si_code: %d (%s)\n", code, cdesc);
+              else
+                printf ("  si_code: %d\n", code);
+              print_siginfo_fields (signo, &si);
+              return;
+            }
+#ifdef __linux__
+          else if (nhdr.n_type == NT_PRSTATUS && desc != NULL && descsz >= sizeof (struct elf_prstatus))
+            {
+              const struct elf_prstatus *pr = (const struct elf_prstatus *) desc;
+              int signo = pr->pr_info.si_signo != 0 ? pr->pr_info.si_signo : pr->pr_cursig;
+              if (signo > 0)
+                {
+                  const char *sname = strsignal (signo);
+                  if (sname == NULL) sname = "unknown";
+                  printf ("Signal %d (%s)\n", signo, sname);
+                  int code = pr->pr_info.si_code;
+                  const char *cdesc = sigcode_desc (signo, code);
+                  if (cdesc != NULL)
+                    printf ("  si_code: %d (%s)\n", code, cdesc);
+                  else
+                    printf ("  si_code: %d\n", code);
+                  return;
+                }
+            }
+#endif
+        }
+    }
+}
 
 static int
 get_addr_width (Dwfl_Module *mod)
@@ -578,6 +927,10 @@ parse_opt (int key, char *arg __attribute__ ((unused)),
       sysroot = arg;
       break;
 
+    case 'g':
+      show_signal = true;
+      break;
+
     case ARGP_KEY_END:
       if (core == NULL && exec != NULL)
 	argp_error (state,
@@ -700,6 +1053,8 @@ main (int argc, char **argv)
 	N_("Show module memory map with build-id, elf and debug files detected"), 0 },
       { "sysroot", 'S', "sysroot", 0,
 	N_("Set the sysroot to search for libraries referenced from the core file"), 0 },
+      { "signal", 'g', NULL, 0,
+	N_("Show crash signal information (core files)"), 0 },
       { NULL, 0, NULL, 0, NULL, 0 }
     };
 
@@ -735,6 +1090,10 @@ invoked with bad or missing arguments it will exit with return code 64.")
   frames.frame = malloc (sizeof (struct frame) * frames.allocated);
   if (frames.frame == NULL)
     error (EXIT_BAD, errno, "malloc frames.frame");
+
+  /* For core files, optionally print the crash signal (if available) before backtraces. */
+  if (show_signal)
+    print_core_signal ();
 
   if (show_one_tid)
     {
